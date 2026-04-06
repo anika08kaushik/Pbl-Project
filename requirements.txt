@@ -1,0 +1,16 @@
+streamlit>=1.24.0
+PyPDF2>=3.0.0
+pandas>=2.0.0
+scikit-learn>=1.2.0
+numpy>=1.24.0
+
+# Optional (only needed if you add OCR/fuzzy matching features)
+pdf2image>=1.16.0  # requires poppler
+pytesseract>=0.3.10  # requires Tesseract OCR installed on the system
+rapidfuzz>=2.13.7  # optional: fast fuzzy string matching
+
+# Sentence-transformers for semantic embeddings
+sentence-transformers>=2.2.2
+torch>=1.12.0
+torchvision>=0.13.0
+matplotlib>=3.6.0
