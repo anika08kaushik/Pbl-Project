@@ -7,6 +7,12 @@ from sklearn.metrics.pairwise import cosine_similarity
 from rapidfuzz import fuzz
 import matplotlib.pyplot as plt
 
+from keybert import KeyBERT
+
+@st.cache_resource
+def load_keyword_model():
+    return KeyBERT()
+
 # Caching helpers: cache the transformer model and embedding computations
 @st.cache_resource
 def load_embedding_model():
@@ -53,37 +59,6 @@ if st.session_state.role:
         st.session_state.role = None
 
 role = st.session_state.role
-
-# ------------------ SKILLS LIST ------------------
-skills_list = [
-    "python", "java", "c++", "sql", "html", "css", "javascript",
-    "machine learning", "deep learning", "data analysis",
-    "pandas", "numpy", "tensorflow", "flask", "react",
-    "mongodb", "excel", "power bi"
-]
-
-# Skill aliases to improve matching (alias -> canonical skill)
-skill_aliases = {
-    "ml": "machine learning",
-    "machine-learning": "machine learning",
-    "deep-learning": "deep learning",
-    "js": "javascript",
-    "py": "python",
-    "c": "c++",
-    "powerbi": "power bi",
-    "nlp": "natural language processing",
-}
-
-# Skill ontology: parent -> related terms
-skill_ontology = {
-    "machine learning": ["ml", "supervised learning", "unsupervised learning", "deep learning"],
-    "data analysis": ["pandas", "numpy", "data visualization", "excel"],
-    "web development": ["html", "css", "javascript", "react", "flask"],
-    "databases": ["sql", "mongodb"],
-    "devops": ["docker", "kubernetes"],
-    "nlp": ["nlp", "natural language processing"],
-}
-
 
 
 # ------------------ FUNCTIONS ------------------
@@ -151,99 +126,94 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
+# def is_valid_skill(phrase):
+#     words = phrase.split()
+
+#     blacklist = ["engineer", "developer", "experience", "work", "team", "system", "role", "skills"]
+
+#     if any(b in phrase for b in blacklist):
+#         return False
+
+#     # ❌ reject weird phrases like "skills python"
+#     if len(words) == 2 and words[0] in ["skills", "experience"]:
+#         return False
+
+#     if len(words) > 2:
+#         return False
+
+#     return True
+
+def extract_experience_years(text):
+    text = text.lower()
+
+    patterns = [
+        r'(\d+)\+?\s*years',
+        r'(\d+)\s*yrs',
+        r'(\d+)\s*year'
+    ]
+
+    years = []
+
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        for m in matches:
+            try:
+                years.append(int(m))
+            except:
+                pass
+
+    return max(years) if years else 0
 
 def parse_job_description(jd_text):
-    """Extract required and optional skills from the job description using simple heuristics."""
-    jd = jd_text or ""
-    lines = [l.strip() for l in jd.splitlines() if l.strip()]
-    required = set()
-    optional = set()
+    skills = extract_skills(jd_text)
 
-    # Look for explicit sections
-    current = None
-    for line in lines:
-        low = line.lower()
-        if low.startswith("required") or "must have" in low:
-            current = "required"
-            continue
-        if low.startswith("optional") or "nice to have" in low:
-            current = "optional"
-            continue
-        # if line contains skill terms, extract
-        found = extract_skills(line)
-        if current == "required":
-            required.update(found)
-        elif current == "optional":
-            optional.update(found)
-        else:
-            # distribute into required if words like 'required' in the line
-            if "required" in low or "must" in low:
-                required.update(found)
-            else:
-                # default to required
-                required.update(found)
-
-    return {"required": sorted(required), "optional": sorted(optional)}
+    return {
+        "required": skills,   # 🔥 take all skills
+        "optional": []
+    }
 
 def extract_skills(text):
-    """Extract skills from text using exact, alias, and fuzzy matching."""
-    found = set()
-    # normalize text for matching
-    text = text.lower()
-    # sentences for localized fuzzy matching
-    sentences = [s.strip() for s in re.split(r'[\n\r\.]+', text) if s.strip()]
+    kw_model = load_keyword_model()
 
-    for skill in skills_list:
-        canonical = skill.lower()
+    keywords = kw_model.extract_keywords(
+        text,
+        keyphrase_ngram_range=(1, 3),
+        stop_words='english',
+        top_n=15
+    )
 
-        # 1) exact match
-        if re.search(r'\b' + re.escape(canonical) + r'\b', text):
-            found.add(skill)
-            continue
+    skills = []
 
-        # 2) alias match
-        for alias, target in skill_aliases.items():
-            if target == canonical:
-                if re.search(r'\b' + re.escape(alias) + r'\b', text):
-                    found.add(skill)
-                    break
-        if skill in found:
-            continue
+    for kw, score in keywords:
+        kw = kw.lower().strip()
 
-        # 3) fuzzy match against sentences (handles minor typos/plurals)
-        for s in sentences:
-            score = fuzz.partial_ratio(canonical, s)
-            if score >= 80:
-                found.add(skill)
-                break
+        # 🔥 stricter threshold
+        if score > 0.5 and 1 <= len(kw.split()) <= 3:
+            skills.append(kw)
 
-    # Map found related terms to ontology parents too
-    parents_found = set()
-    for parent, terms in skill_ontology.items():
-        parent_lower = parent.lower()
-        # if parent already matched directly
-        if any(parent_lower == f.lower() for f in found):
-            parents_found.add(parent)
-            continue
-        # check related terms
-        for t in terms:
-            t_lower = t.lower()
-            if re.search(r'\b' + re.escape(t_lower) + r'\b', text):
-                parents_found.add(parent)
-                break
-            # fuzzy on related terms
-            for s in sentences:
-                if fuzz.partial_ratio(t_lower, s) >= 85:
-                    parents_found.add(parent)
-                    break
-    # Combine canonical found skills (avoid duplicates)
-    final_skills = set(found)
-    # replace related term matches by parent when parent not already in final_skills
-    for p in parents_found:
-        # keep parent as canonical
-        final_skills.add(p)
+    return list(set(skills))
 
-    return sorted(final_skills)
+def enrich_skills(text, skills):
+    model = load_embedding_model()
+    if model is None:
+        return skills
+
+    words = list(set(re.findall(r'\b[A-Za-z\+\#]{2,}\b', text)))
+
+    # encode JD/resume context
+    text_vec = model.encode([text])[0]
+    word_vecs = model.encode(words)
+
+    refined = []
+
+    for i, w in enumerate(words):
+        sim = cosine_similarity([word_vecs[i]], [text_vec])[0][0]
+
+        # 🔥 keep only context-relevant words
+        if sim > 0.4 and 3 < len(w) <= 12:
+            refined.append(w.lower())
+
+    return list(set(skills + refined))
 
 def calculate_match_score(resume, jd):
     # overall semantic similarity between resume and job description
@@ -258,6 +228,16 @@ def calculate_match_score(resume, jd):
         return float(similarity[0][0])
     except Exception:
         return 0.0
+    
+def semantic_match(skill1, skill2):
+    model = load_embedding_model()
+    if model is None:
+        return False
+
+    vecs = model.encode([skill1, skill2])
+    sim = cosine_similarity([vecs[0]], [vecs[1]])[0][0]
+
+    return sim > 0.6
 
 
 def section_embeddings(section_texts):
@@ -272,6 +252,45 @@ def section_embeddings(section_texts):
         return {n: None for n in names}
     return {n: res[i] for i, n in enumerate(names)}
 
+def match_skills(resume_skills, jd_skills, model=None):
+    if model is None:
+        model = load_embedding_model()
+    if model is None:
+        return set()
+
+    if not resume_skills or not jd_skills:
+        return set()
+
+    resume_vecs = model.encode(resume_skills)
+    jd_vecs = model.encode(jd_skills)
+
+    sim_matrix = cosine_similarity(resume_vecs, jd_vecs)
+
+    matched = set()
+
+    for i in range(len(resume_skills)):
+        for j in range(len(jd_skills)):
+            if sim_matrix[i][j] > 0.6 or fuzz.partial_ratio(resume_skills[i], jd_skills[j]) > 80:
+                matched.add(resume_skills[i])
+                break
+
+    return matched
+
+def extract_skill_sections(jd_text):
+    jd_text = jd_text.lower()
+
+    required = ""
+    preferred = ""
+
+    req_match = re.search(r'required skills:(.*?)(preferred skills:|responsibilities:)', jd_text, re.S)
+    if req_match:
+        required = req_match.group(1)
+
+    pref_match = re.search(r'preferred skills:(.*?)(responsibilities:|qualifications:)', jd_text, re.S)
+    if pref_match:
+        preferred = pref_match.group(1)
+
+    return required + " " + preferred
 # ------------------ CANDIDATE FLOW ------------------
 
 if role == "Candidate":
@@ -284,6 +303,8 @@ if role == "Candidate":
 
     if uploaded_file and job_description:
 
+        model = load_embedding_model()
+
         st.success(f"Uploaded: {uploaded_file.name}")
 
         resume_text = extract_text_from_pdf(uploaded_file)
@@ -295,12 +316,17 @@ if role == "Candidate":
 
             # parse sections
             resume_sections = split_sections(cleaned_resume)
-            jd_parsed = parse_job_description(cleaned_jd)
+            jd_skill_text = extract_skill_sections(cleaned_jd)
+            jd_parsed = parse_job_description(jd_skill_text)
 
             # skills
-            resume_skills = extract_skills(resume_sections.get("skills", "") + "\n" + cleaned_resume)
-            jd_required = jd_parsed.get("required", [])
+            resume_skills = extract_skills(cleaned_resume)
+            jd_required = extract_skills(jd_skill_text)
             jd_optional = jd_parsed.get("optional", [])
+
+            # 🔥 FIX: fallback if no skills extracted
+            if len(jd_required) == 0:
+                jd_required = extract_skills(cleaned_jd[:500])
 
             # semantic similarities: overall and per-section
             overall_sim = calculate_match_score(cleaned_resume, cleaned_jd)
@@ -314,6 +340,10 @@ if role == "Candidate":
             experience_sim = 0.0
             projects_sim = 0.0
             skills_sim = 0.0
+
+            resume_exp_years = extract_experience_years(cleaned_resume)
+            jd_exp_years = extract_experience_years(cleaned_jd)
+
             try:
                 if resume_embeds.get("experience") is not None and jd_embeds.get("experience") is not None:
                     experience_sim = float(cosine_similarity([resume_embeds["experience"]], [jd_embeds["experience"]])[0][0])
@@ -326,27 +356,33 @@ if role == "Candidate":
 
             match_score = overall_sim
 
-            common_skills = set(resume_skills) & set(jd_required + jd_optional)
-            missing_required = set(jd_required) - set(resume_skills)
+            common_skills = match_skills(resume_skills, jd_required + jd_optional, model)
+            missing_required = set(jd_required) - common_skills
             missing_optional = set(jd_optional) - set(resume_skills)
 
             # skill_score: required and optional weighted (required more important)
-            req_score = (len(set(resume_skills) & set(jd_required)) / len(jd_required) * 100) if jd_required else 0
-            opt_score = (len(set(resume_skills) & set(jd_optional)) / len(jd_optional) * 100) if jd_optional else 0
+            matched_required = match_skills(resume_skills, jd_required, model)
+            req_score = (len(matched_required) / len(jd_required) * 100) if jd_required else 0
+            matched_optional = match_skills(resume_skills, jd_optional, model)
+            opt_score = (len(matched_optional) / len(jd_optional) * 100) if jd_optional else 0
             skill_score = (0.75 * req_score) + (0.25 * opt_score)
 
             # experience relevance: use experience_sim normalized
-            experience_score = experience_sim * 100
+            if jd_exp_years > 0:
+                exp_ratio = min(resume_exp_years / jd_exp_years, 1)
+                experience_score = exp_ratio * 100
+            else:
+                experience_score = experience_sim * 100
 
             # final score: 0.5 semantic + 0.3 skill + 0.2 experience
-            final_score = (0.5 * match_score * 100) + (0.3 * skill_score) + (0.2 * experience_score)
+            final_score = (0.4 * match_score * 100) + (0.4 * skill_score) + (0.2 * experience_score)
 
             st.subheader("📊 Your Result")
             st.success(f"🎯 Final ATS Score: {final_score:.2f}%")
 
             st.write(f"🔹 Overall Match: {match_score*100:.2f}%")
             st.write(f"🔹 Skill Match: {skill_score:.2f}%")
-            st.write(f"🔹 Experience Relevance: {experience_score:.2f}%")
+            st.write(f"🧠 Detected Experience: {resume_exp_years} years")
 
             st.subheader("✅ Matching Skills")
             st.write(sorted(list(common_skills)))
@@ -356,6 +392,10 @@ if role == "Candidate":
 
             st.subheader("ℹ️ Suggestions")
             suggestions = []
+            if jd_exp_years > 0 and resume_exp_years < jd_exp_years:
+                suggestions.append(
+                f"You have {resume_exp_years} years of experience, but the job requires {jd_exp_years}+ years."
+            )
             if experience_score < 40:
                 suggestions.append("Consider adding more detailed experience descriptions relevant to the job.")
             if len(missing_required) > 0:
@@ -412,8 +452,11 @@ elif role == "Recruiter":
 
     if uploaded_files and job_description:
 
+        model = load_embedding_model()
+
         cleaned_jd = job_description
-        jd_parsed = parse_job_description(cleaned_jd)
+        jd_skill_text = extract_skill_sections(cleaned_jd)
+        jd_parsed = parse_job_description(jd_skill_text)
         jd_skills = jd_parsed.get("required", []) + jd_parsed.get("optional", [])
 
         results = []
@@ -426,7 +469,8 @@ elif role == "Recruiter":
                 continue
 
             resume_sections = split_sections(resume_text)
-            resume_skills = extract_skills(resume_sections.get("skills", "") + "\n" + resume_text)
+            resume_skills = extract_skills(resume_text)
+            jd_required = extract_skills(jd_skill_text)
 
             overall_sim = calculate_match_score(resume_text, cleaned_jd)
 
@@ -436,25 +480,37 @@ elif role == "Recruiter":
             jd_embeds = section_embeddings(jd_sections)
 
             experience_sim = 0.0
+            resume_exp_years = extract_experience_years(resume_text)
+            jd_exp_years = extract_experience_years(cleaned_jd)
             try:
                 if resume_embeds.get("experience") is not None and jd_embeds.get("experience") is not None:
                     experience_sim = float(cosine_similarity([resume_embeds["experience"]], [jd_embeds["experience"]])[0][0])
             except Exception:
                 experience_sim = 0.0
 
-            jd_required = jd_parsed.get("required", [])
+            jd_required = extract_skills(jd_skill_text)
             jd_optional = jd_parsed.get("optional", [])
 
-            common_skills = set(resume_skills) & set(jd_required + jd_optional)
-            missing_required = set(jd_required) - set(resume_skills)
+            # 🔥 FIX: fallback if no skills extracted
+            if len(jd_required) == 0:
+                jd_required = extract_skills(cleaned_jd[:500])
 
-            req_score = (len(set(resume_skills) & set(jd_required)) / len(jd_required) * 100) if jd_required else 0
-            opt_score = (len(set(resume_skills) & set(jd_optional)) / len(jd_optional) * 100) if jd_optional else 0
+            common_skills = match_skills(resume_skills, jd_required + jd_optional, model)
+            missing_required = set(jd_required) - common_skills
+
+            matched_required = match_skills(resume_skills, jd_required, model)
+            req_score = (len(matched_required) / len(jd_required) * 100) if jd_required else 0
+            matched_optional = match_skills(resume_skills, jd_optional, model)
+            opt_score = (len(matched_optional) / len(jd_optional) * 100) if jd_optional else 0
             skill_score = (0.75 * req_score) + (0.25 * opt_score)
 
-            experience_score = experience_sim * 100
+            if jd_exp_years > 0:
+                exp_ratio = min(resume_exp_years / jd_exp_years, 1)
+                experience_score = exp_ratio * 100
+            else:
+                experience_score = experience_sim * 100
 
-            final_score = (0.5 * overall_sim * 100) + (0.3 * skill_score) + (0.2 * experience_score)
+            final_score = (0.4 * match_score * 100) + (0.4 * skill_score) + (0.2 * experience_score)
 
             results.append({
                 "Resume": file.name,
