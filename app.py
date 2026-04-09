@@ -2,7 +2,7 @@ import io
 import streamlit as st
 from PyPDF2 import PdfReader
 import re
-import pandas as pd
+import pandas as pd 
 from sklearn.metrics.pairwise import cosine_similarity
 from rapidfuzz import fuzz
 import matplotlib.pyplot as plt
